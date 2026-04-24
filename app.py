@@ -191,7 +191,7 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
             crop = processed_img[max(0,y1):y2, max(0,x1):x2]
             if crop.size > 0:
                 tp = time.perf_counter()
-                p_res = p_model(crop, conf=0.25, verbose=False)[0]
+                p_res = p_model(crop, conf=0.10, verbose=False)[0]
                 p_time_ms = (time.perf_counter() - tp) * 1000
 
                 for pb in p_res.boxes:
