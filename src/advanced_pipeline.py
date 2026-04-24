@@ -148,11 +148,20 @@ def process_video_stream(video_path, plate_model_path=None, output_path="output_
                         if ocr_engine is not None and plate_crop.size > 0:
                             ocr_result = ocr_engine.ocr(plate_crop, cls=False)
                             if ocr_result and ocr_result[0]:
-                                text = ocr_result[0][0][1][0]
-                                conf = ocr_result[0][0][1][1]
+                                # Sort OCR results by Y-coordinate to handle Two-Line plates (e.g., bikes/trucks)
+                                # ocr_result[0] is a list of [box, (text, score)]
+                                sorted_boxes = sorted(ocr_result[0], key=lambda x: x[0][0][1])
                                 
-                                # Add to temporal fusion buffer
-                                temporal_fusion.add_reading(track_id, text, conf)
+                                combined_text = ""
+                                avg_conf = 0.0
+                                for line in sorted_boxes:
+                                    combined_text += line[1][0]
+                                    avg_conf += line[1][1]
+                                    
+                                avg_conf /= len(sorted_boxes)
+                                
+                                # Add combined stitched text to temporal fusion buffer
+                                temporal_fusion.add_reading(track_id, combined_text, avg_conf)
                                 
                                 # Get the historically verified best read
                                 best_plate = temporal_fusion.get_best_plate(track_id)
