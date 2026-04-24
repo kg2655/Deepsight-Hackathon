@@ -13,10 +13,41 @@ except ImportError:
     print("Warning: PaddleOCR not installed.")
     OCR_AVAILABLE = False
 
-# --- LOAD SOTA YOLO11 MODELS ---
+# --- ROBUST MODEL LOADER ---
+def load_model_with_fallback(model_base_path):
+    """
+    Attempts to load TensorRT engine first for maximum speed.
+    Falls back to ONNX (universal CPU/GPU), then finally PyTorch (.pt)
+    This prevents crashes if the Colab GPU hardware changes!
+    """
+    import os
+    base, _ = os.path.splitext(model_base_path)
+    
+    # Try TensorRT Engine
+    engine_path = f"{base}.engine"
+    if os.path.exists(engine_path):
+        try:
+            print(f"⚡ Attempting to load TensorRT Engine: {engine_path}")
+            return YOLO(engine_path)
+        except Exception as e:
+            print(f"⚠️ TensorRT Load Failed (Hardware mismatch?): {e}")
+            
+    # Try ONNX
+    onnx_path = f"{base}.onnx"
+    if os.path.exists(onnx_path):
+        try:
+            print(f"🚀 Attempting to load ONNX Model: {onnx_path}")
+            return YOLO(onnx_path)
+        except Exception as e:
+            print(f"⚠️ ONNX Load Failed: {e}")
+            
+    # Fallback to PyTorch
+    print(f"🐢 Falling back to PyTorch Model: {model_base_path}")
+    return YOLO(model_base_path)
+
 try:
     print("Loading SOTA YOLO11 Vehicle Detection Model...")
-    vehicle_model = YOLO("yolo11n.pt") # Upgraded to YOLO11
+    vehicle_model = load_model_with_fallback("yolo11n.pt")
 except Exception as e:
     print(f"Error loading vehicle model: {e}")
     sys.exit(1)
@@ -25,8 +56,14 @@ VEHICLE_CLASSES = [2, 3, 5, 7] # COCO Car, Motorcycle, Bus, Truck
 
 def initialize_ocr():
     if not OCR_AVAILABLE: return None
-    # Use GPU for PaddleOCR to crush inference time
-    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False, use_gpu=True)
+    # Auto-detect GPU — won't crash on Colab CPU instances
+    try:
+        import torch
+        gpu_available = torch.cuda.is_available()
+    except ImportError:
+        gpu_available = False
+    print(f"🔍 PaddleOCR using GPU: {gpu_available}")
+    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False, use_gpu=gpu_available)
 
 def apply_zero_dce_lite(img):
     """
@@ -102,7 +139,7 @@ def process_video_stream(video_path, plate_model_path=None, output_path="output_
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
-    plate_model = YOLO(plate_model_path) if plate_model_path else None
+    plate_model = load_model_with_fallback(plate_model_path) if plate_model_path else None
     ocr_engine = initialize_ocr()
     temporal_fusion = TemporalOCRFusion()
     
@@ -170,7 +207,7 @@ def process_video_stream(video_path, plate_model_path=None, output_path="output_
                                 abs_px1, abs_py1 = x1 + px1, y1 + py1
                                 abs_px2, abs_py2 = x1 + px2, y1 + py2
                                 cv2.rectangle(img, (abs_px1, abs_py1), (abs_px2, abs_py2), (0, 255, 0), 2)
-                                cv2.putText(img, best_plate if best_plate else text, 
+                                cv2.putText(img, best_plate if best_plate else combined_text, 
                                            (abs_px1, abs_py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         out.write(img)
