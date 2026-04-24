@@ -1,0 +1,5 @@
+train: C:\Users\Kannu Goyal\Downloads\deepsight\train set\images
+val: C:\Users\Kannu Goyal\Downloads\deepsight\train set\images  # Using train set for validation just to ensure script runs
+
+nc: 1
+names: ['license_plate']

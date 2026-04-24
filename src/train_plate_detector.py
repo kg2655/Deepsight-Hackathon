@@ -4,39 +4,35 @@ import os
 
 def train_plate_model(data_yaml_path, epochs=30, batch_size=16):
     """
-    Trains a YOLOv8n model specifically for license plate detection.
-    
-    Args:
-        data_yaml_path (str): Path to the dataset.yaml file (YOLO format)
-        epochs (int): Number of training epochs
-        batch_size (int): Batch size
+    Trains an Advanced YOLO11n model specifically for license plate detection.
     """
     if not os.path.exists(data_yaml_path):
         print(f"Error: {data_yaml_path} not found. Please ensure your downloaded dataset is extracted and the path is correct.")
         return
         
-    print(f"Initializing YOLOv8n for plate detection training on {data_yaml_path}...")
+    print(f"Initializing YOLO11n for SOTA plate detection training on {data_yaml_path}...")
     
-    # Load a fresh YOLOv8n model (weights)
-    model = YOLO("yolov8n.pt")
+    # Load a fresh YOLO11n model (weights)
+    # This will automatically download yolo11n.pt if not present.
+    model = YOLO("yolo11n.pt")
     
     # Train the model
-    # Note: On Colab, change device to 0 (for GPU). For CPU it defaults to 'cpu'.
     results = model.train(
         data=data_yaml_path,
         epochs=epochs,
         batch=batch_size,
         imgsz=640,
-        name="plate_detector_run",
-        project="runs/detect"
+        name="plate_detector_yolo11",
+        project="runs/detect",
+        device=0 # Enforce GPU Usage
     )
     
-    print("\nTraining complete!")
-    print("Your trained plate detection model is located at: runs/detect/plate_detector_run/weights/best.pt")
+    print("\n✅ Training complete!")
+    print("Your advanced YOLO11 plate detection model is located at: runs/detect/plate_detector_yolo11/weights/best.pt")
     return results
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Plate Detector YOLOv8 Modal")
+    parser = argparse.ArgumentParser(description="Train SOTA Plate Detector (YOLO11)")
     parser.add_argument("--data", type=str, required=True, help="Path to your dataset's data.yaml file")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--batch", type=int, default=16, help="Batch size")
