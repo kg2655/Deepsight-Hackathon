@@ -151,13 +151,17 @@ def validate_plate(text):
     return None
 
 # ─── Core Detection Function ──────────────────────────────────────────────────
-def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh):
+def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess=True):
     """Full pipeline: Vehicle Detection → Plate Detection → OCR."""
-    enhanced = preprocess(img_bgr)
+    if use_preprocess:
+        processed_img = preprocess(img_bgr)
+    else:
+        processed_img = img_bgr
+        
     annotated = img_bgr.copy()
 
     t0 = time.perf_counter()
-    v_results = v_model(enhanced, conf=conf_thresh, iou=iou_thresh,
+    v_results = v_model(processed_img, conf=conf_thresh, iou=iou_thresh,
                         classes=VEHICLE_CLASSES, verbose=False)[0]
     v_time_ms = (time.perf_counter() - t0) * 1000
 
@@ -184,7 +188,7 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh):
 
         # ── Plate Detection ──
         if p_model:
-            crop = enhanced[max(0,y1):y2, max(0,x1):x2]
+            crop = processed_img[max(0,y1):y2, max(0,x1):x2]
             if crop.size > 0:
                 tp = time.perf_counter()
                 p_res = p_model(crop, conf=0.25, verbose=False)[0]
@@ -240,6 +244,7 @@ with st.sidebar:
     st.markdown("### ⚙️ Pipeline Settings")
     conf_thresh = st.slider("Vehicle Confidence", 0.10, 0.90, 0.30, 0.05)
     iou_thresh  = st.slider("IoU (NMS)", 0.10, 0.90, 0.45, 0.05)
+    use_preprocess = st.checkbox("Night/Glare Preprocessing", value=False, help="Uncheck for normal daylight or blurry images. Check for low-light or glare.")
 
     st.markdown("---")
     st.markdown("### 🎯 Classes")
@@ -293,7 +298,7 @@ with tab1:
 
             if st.button("🚀 Run Full ANPR Pipeline", key="run_img") and model_loaded:
                 with st.spinner("Detecting vehicles and reading plates..."):
-                    annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh)
+                    annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
                 st.session_state["img_out"] = (annotated, dets, inf_ms)
 
         # ── Sample image button for quick demo ──
@@ -304,7 +309,7 @@ with tab1:
             img_sample = cv2.imread("sample_demo.jpg")
             if img_sample is not None:
                 with st.spinner("Running on sample image..."):
-                    annotated, dets, inf_ms = detect_frame(img_sample, v_model, p_model, ocr, conf_thresh, iou_thresh)
+                    annotated, dets, inf_ms = detect_frame(img_sample, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
                 st.session_state["img_out"] = (annotated, dets, inf_ms)
                 st.rerun()
 
