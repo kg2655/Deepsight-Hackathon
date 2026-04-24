@@ -386,7 +386,7 @@ with tab2:
                     ret, frame = cap.read()
                     if not ret: break
                     if fi % 2 == 0:  # process every 2nd frame
-                        ann, dets, ms = detect_frame(frame, v_model, p_model, ocr, conf_thresh, iou_thresh)
+                        ann, dets, ms = detect_frame(frame, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
                         times.append(ms)
                         all_dets.extend(dets)
                         processed += 1
