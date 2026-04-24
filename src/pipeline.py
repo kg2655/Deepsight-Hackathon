@@ -27,8 +27,8 @@ VEHICLE_CLASSES = [2, 3, 5, 7]
 def initialize_ocr():
     if not OCR_AVAILABLE:
         return None
-    print("Initializing PaddleOCR EN Mobile Model...")
-    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+    print("Initializing PaddleOCR EN Mobile Model (GPU Accelerated)...")
+    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False, use_gpu=True)
 
 def apply_claHE(img):
     """
