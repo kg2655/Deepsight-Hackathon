@@ -291,9 +291,14 @@ with tab1:
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Input", use_container_width=True)
 
+            if st.button("🚀 Run Full ANPR Pipeline", key="run_img") and model_loaded:
+                with st.spinner("Detecting vehicles and reading plates..."):
+                    annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh)
+                st.session_state["img_out"] = (annotated, dets, inf_ms)
+
         # ── Sample image button for quick demo ──
         st.markdown("**No image? Use a sample:**")
-        if st.button("🖼️ Load Sample Traffic Image", key="sample_img"):
+        if st.button("🖼️ Load Sample Traffic Image", key="sample_img") and model_loaded:
             import urllib.request
             urllib.request.urlretrieve("https://ultralytics.com/images/bus.jpg", "sample_demo.jpg")
             img_sample = cv2.imread("sample_demo.jpg")
@@ -303,10 +308,6 @@ with tab1:
                 st.session_state["img_out"] = (annotated, dets, inf_ms)
                 st.rerun()
 
-            if st.button("🚀 Run Full ANPR Pipeline", key="run_img") and model_loaded:
-                with st.spinner("Detecting vehicles and reading plates..."):
-                    annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh)
-                st.session_state["img_out"] = (annotated, dets, inf_ms)
 
     with col_r:
         if "img_out" in st.session_state:
