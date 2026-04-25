@@ -155,24 +155,42 @@ def read_plate_text(ocr, plate_crop):
     """Universal OCR reader that works with both EasyOCR and PaddleOCR."""
     import easyocr
     try:
-        # Convert to clean black-on-white for OCR
+        # Method 1: Otsu threshold (clean binary)
         gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-        # Adaptive threshold: handles uneven lighting on plates
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                        cv2.THRESH_BINARY, 21, 10)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Invert if background is dark (white text on dark plate)
+        if np.mean(thresh) < 127:
+            thresh = cv2.bitwise_not(thresh)
         plate_clean = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
         plate_clean = cv2.resize(plate_clean, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
         plate_clean = cv2.copyMakeBorder(plate_clean, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
+        # Method 2: Also try with just enhanced grayscale (no threshold)
+        gray2 = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.equalizeHist(gray2)
+        plate_gray = cv2.cvtColor(gray2, cv2.COLOR_GRAY2BGR)
+        plate_gray = cv2.resize(plate_gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        plate_gray = cv2.copyMakeBorder(plate_gray, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
+        PLATE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
         if isinstance(ocr, easyocr.Reader):
-            results = ocr.readtext(plate_clean)
-            if results:
-                texts = [r[1] for r in results]
-                scores = [r[2] for r in results]
-                combined = " ".join(texts)
-                avg_conf = sum(scores) / len(scores)
-                validated = validate_plate(combined)
-                return (validated if validated else combined.strip()), avg_conf
+            # Try both methods, pick the one with higher confidence
+            best_text, best_conf = None, 0
+            for img_try in [plate_clean, plate_gray]:
+                results = ocr.readtext(img_try, allowlist=PLATE_CHARS, paragraph=False)
+                if results:
+                    texts = [r[1] for r in results]
+                    scores = [float(r[2]) for r in results]
+                    combined = "".join(texts)
+                    avg_conf = sum(scores) / len(scores)
+                    if avg_conf > best_conf:
+                        best_text = combined
+                        best_conf = avg_conf
+            if best_text:
+                validated = validate_plate(best_text)
+                return (validated if validated else best_text.strip()), best_conf
         else:
             # PaddleOCR fallback
             r_gen = ocr.predict(plate_clean)
