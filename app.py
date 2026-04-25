@@ -253,12 +253,83 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
             "p_infer_ms":      round(p_time_ms, 1),
         })
 
+    # ── FALLBACK: If no vehicles found, run plate detector on FULL image ──
+    if len(detections) == 0 and p_model:
+        tp = time.perf_counter()
+        p_res = p_model(processed_img, conf=0.10, verbose=False)[0]
+        p_time_ms = (time.perf_counter() - tp) * 1000
+
+        for pb in p_res.boxes:
+            px1, py1, px2, py2 = map(int, pb.xyxy[0])
+            plate_conf_val = float(pb.conf[0])
+
+            pad = 2
+            py1_p = max(0, py1 - pad)
+            py2_p = min(processed_img.shape[0], py2 + pad)
+            px1_p = max(0, px1 - pad)
+            px2_p = min(processed_img.shape[1], px2 + pad)
+            plate_crop = processed_img[py1_p:py2_p, px1_p:px2_p]
+
+            if plate_crop.size == 0:
+                continue
+
+            cv2.rectangle(annotated, (px1, py1), (px2, py2), PLATE_COLOR, 2)
+
+            plate_text = None
+            plate_conf = plate_conf_val
+
+            if ocr is not None:
+                try:
+                    plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                    plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
+                    r_gen = ocr.predict(plate_crop)
+                    r = list(r_gen) if r_gen else []
+
+                    found_texts = []
+                    found_scores = []
+
+                    if r:
+                        res_obj = r[0]
+                        if isinstance(res_obj, dict) and 'rec_texts' in res_obj:
+                            found_texts = res_obj['rec_texts']
+                            found_scores = res_obj.get('rec_scores', [1.0] * len(found_texts))
+                        elif hasattr(res_obj, 'res') and 'rec_texts' in res_obj.res:
+                            found_texts = res_obj.res['rec_texts']
+                            found_scores = res_obj.res.get('rec_scores', [1.0] * len(found_texts))
+                        elif isinstance(res_obj, list):
+                            found_texts = [line[1][0] for line in res_obj]
+                            found_scores = [line[1][1] for line in res_obj]
+
+                    if found_texts:
+                        combined = " ".join(found_texts)
+                        avg_c = sum(found_scores) / len(found_scores)
+                        validated = validate_plate(combined)
+                        plate_text = validated if validated else combined.strip()
+                        plate_conf = avg_c
+
+                        cv2.putText(annotated, plate_text,
+                                    (px1, py2 + 22),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, PLATE_COLOR, 2)
+                except Exception:
+                    pass
+
+            detections.append({
+                "vehicle_type":    "Direct Plate",
+                "vehicle_conf":    round(plate_conf, 3),
+                "vehicle_bbox":    [px1, py1, px2, py2],
+                "plate_text":      plate_text or "—",
+                "plate_conf":      round(plate_conf, 3) if plate_conf else None,
+                "v_infer_ms":      round(v_time_ms, 1),
+                "p_infer_ms":      round(p_time_ms, 1),
+            })
+
     return annotated, detections, v_time_ms
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### ⚙️ Pipeline Settings")
-    conf_thresh = st.slider("Vehicle Confidence", 0.10, 0.90, 0.30, 0.05)
+    conf_thresh = st.slider("Vehicle Confidence", 0.10, 0.90, 0.15, 0.05)
     iou_thresh  = st.slider("IoU (NMS)", 0.10, 0.90, 0.45, 0.05)
     use_preprocess = st.checkbox("Night/Glare Preprocessing", value=False)
 
