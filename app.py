@@ -204,12 +204,14 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
 
                     if ocr is not None:
                         try:
-                            # --- 🚀 THE UPSCALING & BORDER HACK ---
-                            # Double the image size
+                            # --- 🚀 PLATE ENHANCEMENT + UPSCALING ---
+                            gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+                            gray = clahe.apply(gray)
+                            plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                             plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                            # Add a solid white 20px border so the OCR engine has breathing room
                             plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-                            # --------------------------------------
+                            # -----------------------------------------
 
                             # Use new predict logic
                             r_gen = ocr.predict(plate_crop)
@@ -280,6 +282,11 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
 
             if ocr is not None:
                 try:
+                    # Brighten plate crop for OCR
+                    gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+                    gray = clahe.apply(gray)
+                    plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                     plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
                     plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
