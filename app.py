@@ -6,6 +6,7 @@ import os
 import tempfile
 import json
 import pandas as pd
+import re
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -89,7 +90,6 @@ def load_models():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Vehicle model with fallback
     v_model = None
     for path in ["yolo11n.engine", "yolo11n.onnx", "yolo11n.pt"]:
         if os.path.exists(path):
@@ -99,9 +99,8 @@ def load_models():
             except Exception:
                 continue
     if v_model is None:
-        v_model = YOLO("yolo11n.pt")  # downloads if missing
+        v_model = YOLO("yolo11n.pt")
 
-    # Plate model with fallback
     p_model = None
     base = os.path.splitext(PLATE_MODEL_PATH)[0]
     for path in [f"{base}.engine", f"{base}.onnx", PLATE_MODEL_PATH]:
@@ -119,9 +118,9 @@ def load_models():
 def load_ocr():
     try:
         from paddleocr import PaddleOCR
-        import torch
-        gpu = torch.cuda.is_available()
-        return PaddleOCR(use_angle_cls=True, lang='en', show_log=False, use_gpu=gpu)
+        import logging
+        logging.getLogger("ppocr").setLevel(logging.ERROR)
+        return PaddleOCR(use_textline_orientation=True, lang='en')
     except Exception:
         return None
 
@@ -142,8 +141,6 @@ def preprocess(img):
     enhanced = cv2.addWeighted(enhanced, 1.4, blur, -0.4, 0)
     return enhanced
 
-# ─── Indian Plate Validation ──────────────────────────────────────────────────
-import re
 def validate_plate(text):
     cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
     if 6 <= len(cleaned) <= 10:
@@ -152,7 +149,6 @@ def validate_plate(text):
 
 # ─── Core Detection Function ──────────────────────────────────────────────────
 def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess=True):
-    """Full pipeline: Vehicle Detection → Plate Detection → OCR."""
     if use_preprocess:
         processed_img = preprocess(img_bgr)
     else:
@@ -174,7 +170,6 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
         color    = VEHICLE_COLORS.get(cls_id, (200, 200, 200))
         label    = CLASS_NAMES.get(cls_id, "Vehicle")
 
-        # Draw vehicle box
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
         txt = f"{label} {conf_v:.0%}"
         (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -186,7 +181,6 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
         plate_conf = None
         p_time_ms  = 0.0
 
-        # ── Plate Detection ──
         if p_model:
             crop = processed_img[max(0,y1):y2, max(0,x1):x2]
             if crop.size > 0:
@@ -196,33 +190,55 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
 
                 for pb in p_res.boxes:
                     px1,py1,px2,py2 = map(int, pb.xyxy[0])
-                    plate_crop = crop[max(0,py1):py2, max(0,px1):px2]
-                    if plate_crop.size == 0:
-                        continue
+                    
+                    pad = 2
+                    py1_p = max(0, py1 - pad)
+                    py2_p = min(crop.shape[0], py2 + pad)
+                    px1_p = max(0, px1 - pad)
+                    px2_p = min(crop.shape[1], px2 + pad)
+                    plate_crop = crop[py1_p:py2_p, px1_p:px2_p]
 
-                    # Draw plate box on annotated frame
-                    ax1,ay1 = x1+px1, y1+py1
-                    ax2,ay2 = x1+px2, y1+py2
-                    cv2.rectangle(annotated, (ax1,ay1), (ax2,ay2), PLATE_COLOR, 2)
+                    if plate_crop.size == 0: continue
 
-                    # ── OCR ──
+                    cv2.rectangle(annotated, (x1+px1, y1+py1), (x1+px2, y1+py2), PLATE_COLOR, 2)
+
                     if ocr is not None:
                         try:
-                            ocr_result = ocr.ocr(plate_crop, cls=False)
-                            if ocr_result and ocr_result[0]:
-                                sorted_lines = sorted(ocr_result[0], key=lambda x: x[0][0][1])
-                                combined = "".join(line[1][0] for line in sorted_lines)
-                                avg_c    = sum(line[1][1] for line in sorted_lines) / len(sorted_lines)
+                            # --- 🚀 THE UPSCALING & BORDER HACK ---
+                            # Double the image size
+                            plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                            # Add a solid white 20px border so the OCR engine has breathing room
+                            plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+                            # --------------------------------------
+
+                            # Use new predict logic
+                            r_gen = ocr.predict(plate_crop)
+                            r = list(r_gen) if r_gen else []
+                            
+                            found_texts = []
+                            found_scores = []
+                            
+                            if r:
+                                res_obj = r[0]
+                                if isinstance(res_obj, dict) and 'rec_texts' in res_obj:
+                                    found_texts = res_obj['rec_texts']
+                                    found_scores = res_obj.get('rec_scores', [1.0]*len(found_texts))
+                                elif hasattr(res_obj, 'res') and 'rec_texts' in res_obj.res:
+                                    found_texts = res_obj.res['rec_texts']
+                                    found_scores = res_obj.res.get('rec_scores', [1.0]*len(found_texts))
+                                elif isinstance(res_obj, list):
+                                    found_texts = [line[1][0] for line in res_obj]
+                                    found_scores = [line[1][1] for line in res_obj]
+
+                            if found_texts:
+                                combined = " ".join(found_texts)
+                                avg_c = sum(found_scores) / len(found_scores)
                                 validated = validate_plate(combined)
-                                if validated:
-                                    plate_text = validated
-                                    plate_conf = avg_c
-                                else:
-                                    plate_text = combined.strip()
-                                    plate_conf = avg_c
+                                plate_text = validated if validated else combined.strip()
+                                plate_conf = avg_c
 
                                 cv2.putText(annotated, plate_text,
-                                            (ax1, ay2 + 18),
+                                            (x1+px1, y1+py2 + 18),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, PLATE_COLOR, 2)
                         except Exception:
                             pass
@@ -244,16 +260,15 @@ with st.sidebar:
     st.markdown("### ⚙️ Pipeline Settings")
     conf_thresh = st.slider("Vehicle Confidence", 0.10, 0.90, 0.30, 0.05)
     iou_thresh  = st.slider("IoU (NMS)", 0.10, 0.90, 0.45, 0.05)
-    use_preprocess = st.checkbox("Night/Glare Preprocessing", value=False, help="Uncheck for normal daylight or blurry images. Check for low-light or glare.")
+    use_preprocess = st.checkbox("Night/Glare Preprocessing", value=False)
 
     st.markdown("---")
     st.markdown("### 🎯 Classes")
-    detect_cars  = st.checkbox("🚗 Cars",        value=True)
-    detect_motos = st.checkbox("🏍️ Motorcycles", value=True)
-    detect_buses = st.checkbox("🚌 Buses",        value=True)
-    detect_trucks= st.checkbox("🚛 Trucks",       value=True)
-    class_map    = {2: detect_cars, 3: detect_motos, 5: detect_buses, 7: detect_trucks}
-    active_classes = [k for k,v in class_map.items() if v]
+    detect_cars   = st.checkbox("🚗 Cars",        value=True)
+    detect_motos  = st.checkbox("🏍️ Motorcycles", value=True)
+    detect_buses  = st.checkbox("🚌 Buses",        value=True)
+    detect_trucks = st.checkbox("🚛 Trucks",       value=True)
+    active_classes = [k for k,v in {2: detect_cars, 3: detect_motos, 5: detect_buses, 7: detect_trucks}.items() if v]
 
     st.markdown("---")
     st.markdown("### 📊 System Metrics")
@@ -281,243 +296,62 @@ with st.sidebar:
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📷 Image ANPR", "🎬 Video ANPR", "📊 Model Metrics"])
 
-# ════════════════════════════════════════════
-# TAB 1 — Image
-# ════════════════════════════════════════════
 with tab1:
     col_l, col_r = st.columns([1, 1], gap="medium")
-
     with col_l:
         st.markdown("#### 📤 Upload Image")
-        uploaded = st.file_uploader("JPEG / PNG / BMP", type=["jpg","jpeg","png","bmp","webp"], key="img_up")
-
+        uploaded = st.file_uploader("JPEG / PNG / BMP", type=["jpg","jpeg","png","bmp","webp"])
         if uploaded:
             arr = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Input", use_container_width=True)
-
-            if st.button("🚀 Run Full ANPR Pipeline", key="run_img") and model_loaded:
-                with st.spinner("Detecting vehicles and reading plates..."):
-                    annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
+            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
+            if st.button("🚀 Run Full ANPR Pipeline") and model_loaded:
+                annotated, dets, inf_ms = detect_frame(img, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
                 st.session_state["img_out"] = (annotated, dets, inf_ms)
-
-        # ── Sample image button for quick demo ──
-        st.markdown("**No image? Use a sample:**")
-        if st.button("🖼️ Load Sample Traffic Image", key="sample_img") and model_loaded:
-            import urllib.request
-            urllib.request.urlretrieve("https://ultralytics.com/images/bus.jpg", "sample_demo.jpg")
-            img_sample = cv2.imread("sample_demo.jpg")
-            if img_sample is not None:
-                with st.spinner("Running on sample image..."):
-                    annotated, dets, inf_ms = detect_frame(img_sample, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
-                st.session_state["img_out"] = (annotated, dets, inf_ms)
-                st.rerun()
-
 
     with col_r:
         if "img_out" in st.session_state:
             annotated, dets, inf_ms = st.session_state["img_out"]
-            st.markdown("#### 🎯 Results")
-            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="Annotated Output", use_container_width=True)
-
+            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), use_container_width=True)
             m1,m2,m3,m4 = st.columns(4)
             with m1: st.markdown(f'<div class="metric-card"><div class="metric-value">{len(dets)}</div><div class="metric-label">Vehicles</div></div>', unsafe_allow_html=True)
             with m2: st.markdown(f'<div class="metric-card"><div class="metric-value">{inf_ms:.0f}ms</div><div class="metric-label">Inference</div></div>', unsafe_allow_html=True)
             with m3:
                 plates = [d for d in dets if d["plate_text"] != "—"]
-                st.markdown(f'<div class="metric-card"><div class="metric-value class="good"">{len(plates)}</div><div class="metric-label">Plates Read</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="metric-card"><div class="metric-value good">{len(plates)}</div><div class="metric-label">Plates Read</div></div>', unsafe_allow_html=True)
             with m4: st.markdown(f'<div class="metric-card"><div class="metric-value">{1000/max(inf_ms,1):.0f}</div><div class="metric-label">FPS Equiv.</div></div>', unsafe_allow_html=True)
 
-            st.markdown("#### 📋 Detection Log")
             for i, d in enumerate(dets):
-                plate_str = f"🟢 **{d['plate_text']}** (conf: {d['plate_conf']})" if d["plate_text"] != "—" else "⚠️ No plate detected"
-                st.markdown(f"""
-                <div class="detection-card">
-                    <b>#{i+1} {d['vehicle_type']}</b> — Confidence: {d['vehicle_conf']:.0%} | BBox: {d['vehicle_bbox']}<br>
-                    🔤 Plate: {plate_str}
-                </div>
-                """, unsafe_allow_html=True)
+                plate_str = f"🟢 **{d['plate_text']}**" if d["plate_text"] != "—" else "⚠️ No plate detected"
+                st.markdown(f'<div class="detection-card"><b>#{i+1} {d["vehicle_type"]}</b> — Confidence: {d["vehicle_conf"]:.0%}<br>🔤 Plate: {plate_str}</div>', unsafe_allow_html=True)
 
-            # JSON + Image Download
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    "⬇️ Download JSON",
-                    data=json.dumps({"detections": dets}, indent=2),
-                    file_name="knightsight_results.json",
-                    mime="application/json"
-                )
-            with col_dl2:
-                # Encode annotated image as PNG for download
-                _, img_encoded = cv2.imencode(".png", annotated)
-                st.download_button(
-                    "⬇️ Download Annotated Image",
-                    data=img_encoded.tobytes(),
-                    file_name="anpr_annotated.png",
-                    mime="image/png"
-                )
-
-# ════════════════════════════════════════════
-# TAB 2 — Video
-# ════════════════════════════════════════════
 with tab2:
-    vf = st.file_uploader("Upload MP4 / AVI", type=["mp4","avi","mov"], key="vid_up")
-
+    st.info("Upload a video to process frames.")
+    vf = st.file_uploader("Upload MP4 / AVI", type=["mp4","avi","mov"])
     if vf:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tmp.write(vf.read()); tmp.flush()
+        if st.button("🚀 Run Video Pipeline"):
+            cap = cv2.VideoCapture(tmp.name)
+            ph = st.empty()
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
+                ann, dets, ms = detect_frame(frame, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
+                ph.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), use_container_width=True)
+            cap.release()
 
-        col_vl, col_vr = st.columns([1, 1], gap="medium")
-        with col_vl:
-            st.video(tmp.name)
-            max_frames = st.slider("Max Frames to Process", 10, 500, 100)
-
-        with col_vr:
-            if st.button("🚀 Run Video Pipeline", key="run_vid") and model_loaded:
-                cap = cv2.VideoCapture(tmp.name)
-                prog = st.progress(0, text="Starting...")
-                ph   = st.empty()
-                all_dets = []
-                times    = []
-                processed = 0
-                fi = 0
-
-                while cap.isOpened() and processed < max_frames:
-                    ret, frame = cap.read()
-                    if not ret: break
-                    if fi % 2 == 0:  # process every 2nd frame
-                        ann, dets, ms = detect_frame(frame, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess)
-                        times.append(ms)
-                        all_dets.extend(dets)
-                        processed += 1
-                        ph.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB),
-                                 caption=f"Frame {fi} | {len(dets)} vehicles | {ms:.0f}ms",
-                                 use_container_width=True)
-                        prog.progress(processed/max_frames, text=f"Frame {processed}/{max_frames}")
-                    fi += 1
-
-                cap.release()
-                prog.empty()
-
-                avg = sum(times)/max(len(times),1)
-                plates_found = [d for d in all_dets if d["plate_text"] != "—"]
-
-                rm1,rm2,rm3,rm4 = st.columns(4)
-                with rm1: st.markdown(f'<div class="metric-card"><div class="metric-value">{processed}</div><div class="metric-label">Frames</div></div>', unsafe_allow_html=True)
-                with rm2: st.markdown(f'<div class="metric-card"><div class="metric-value">{avg:.0f}ms</div><div class="metric-label">Avg Inference</div></div>', unsafe_allow_html=True)
-                with rm3: st.markdown(f'<div class="metric-card"><div class="metric-value">{1000/max(avg,1):.0f}</div><div class="metric-label">FPS</div></div>', unsafe_allow_html=True)
-                with rm4: st.markdown(f'<div class="metric-card"><div class="metric-value class="good"">{len(plates_found)}</div><div class="metric-label">Plates Read</div></div>', unsafe_allow_html=True)
-
-                if plates_found:
-                    st.markdown("#### 🔤 Plates Detected")
-                    unique_plates = list({d["plate_text"]: d for d in plates_found}.values())
-                    for p in unique_plates:
-                        st.markdown(f'<div class="plate-card">🟢 <b>{p["plate_text"]}</b> — {p["vehicle_type"]} | Confidence: {p["plate_conf"]}</div>', unsafe_allow_html=True)
-
-# ════════════════════════════════════════════
-# TAB 3 — Model Metrics (for Evaluation 2)
-# ════════════════════════════════════════════
 with tab3:
     st.markdown("#### 📊 Model Performance Report")
-    st.markdown("*Metrics from training run: `plate_detector_yolo11` — 30 epochs on Indian plate dataset*")
-
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1: st.markdown('<div class="metric-card"><div class="metric-value good">99.38%</div><div class="metric-label">mAP@50</div></div>', unsafe_allow_html=True)
-    with c2: st.markdown('<div class="metric-card"><div class="metric-value good">72.96%</div><div class="metric-label">mAP@50:95</div></div>', unsafe_allow_html=True)
-    with c3: st.markdown('<div class="metric-card"><div class="metric-value good">98.97%</div><div class="metric-label">Precision</div></div>', unsafe_allow_html=True)
-    with c4: st.markdown('<div class="metric-card"><div class="metric-value good">97.95%</div><div class="metric-label">Recall</div></div>', unsafe_allow_html=True)
-    with c5: st.markdown('<div class="metric-card"><div class="metric-value">0.969</div><div class="metric-label">Val Box Loss</div></div>', unsafe_allow_html=True)
+    with c2: st.markdown('<div class="metric-card"><div class="metric-value good">98.97%</div><div class="metric-label">Precision</div></div>', unsafe_allow_html=True)
+    with c3: st.markdown('<div class="metric-card"><div class="metric-value good">97.95%</div><div class="metric-label">Recall</div></div>', unsafe_allow_html=True)
+    with c4: st.markdown('<div class="metric-card"><div class="metric-value">5.4 MB</div><div class="metric-label">Model Size</div></div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    # ── Training Curves ──────────────────────────────────────────────────────
-    RESULTS_PNG = "runs/detect/runs/detect/plate_detector_yolo11/results.png"
-    CONFUSION_PNG = "runs/detect/runs/detect/plate_detector_yolo11/confusion_matrix_normalized.png"
-
-    st.markdown("#### 📈 Training Curves")
-    st.markdown("*Loss curves show consistent decrease — zero signs of overfitting*")
-
-    img_col1, img_col2 = st.columns([2, 1])
-    with img_col1:
-        if os.path.exists(RESULTS_PNG):
-            st.image(RESULTS_PNG, caption="Training & Validation Loss / mAP curves (30 epochs)", use_container_width=True)
-        else:
-            st.info("Training curves not found. Run training first.")
-    with img_col2:
-        if os.path.exists(CONFUSION_PNG):
-            st.image(CONFUSION_PNG, caption="Normalized Confusion Matrix", use_container_width=True)
-        else:
-            st.info("Confusion matrix not found.")
-
-    st.markdown("---")
-
-    # ── Live Benchmark ───────────────────────────────────────────────────────
-    st.markdown("#### ⚡ Live Inference Benchmark")
-    st.markdown("*Run 30 inference passes and measure real hardware speed*")
-
-    if st.button("▶️ Run Live Benchmark", key="benchmark") and model_loaded:
-        import torch
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        times = []
-
-        bench_prog = st.progress(0, text="Warming up...")
-        # Warmup
-        for _ in range(5):
-            v_model(dummy, verbose=False)
-
-        # Benchmark
-        for i in range(30):
-            t = time.perf_counter()
-            v_model(dummy, classes=VEHICLE_CLASSES, verbose=False)
-            times.append((time.perf_counter() - t) * 1000)
-            bench_prog.progress((i+1)/30, text=f"Pass {i+1}/30...")
-
-        bench_prog.empty()
-        avg_ms = float(np.mean(times))
-        p95_ms = float(np.percentile(times, 95))
-        fps    = 1000 / avg_ms
-
-        b1, b2, b3, b4 = st.columns(4)
-        device_label = "🟢 GPU (T4)" if torch.cuda.is_available() else "🟡 CPU"
-        with b1: st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_ms:.1f}ms</div><div class="metric-label">Mean Latency</div></div>', unsafe_allow_html=True)
-        with b2: st.markdown(f'<div class="metric-card"><div class="metric-value">{p95_ms:.1f}ms</div><div class="metric-label">P95 Latency</div></div>', unsafe_allow_html=True)
-        with b3: st.markdown(f'<div class="metric-card"><div class="metric-value good">{fps:.1f}</div><div class="metric-label">FPS</div></div>', unsafe_allow_html=True)
-        with b4: st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:0.9rem;">{device_label}</div><div class="metric-label">Device</div></div>', unsafe_allow_html=True)
-
-        passed = avg_ms < 250
-        if passed:
-            st.success(f"✅ PASS — {avg_ms:.1f}ms avg latency is well under the 250ms limit!")
-        else:
-            st.error(f"❌ {avg_ms:.1f}ms exceeds 250ms limit — check hardware.")
-
-    st.markdown("---")
-    st.markdown("#### 🏎️ Model Architecture & Efficiency")
-
-    df = pd.DataFrame([
-        {"Model": "YOLOv8n (Baseline)", "mAP@50": "37.3%", "Params": "3.2M", "GFLOPs": "8.7", "Size": "6.3 MB", "CPU Latency": "~120ms"},
-        {"Model": "YOLOv11n (Ours - Vehicle)", "mAP@50": "39.5%", "Params": "2.6M", "GFLOPs": "6.5", "Size": "5.4 MB", "CPU Latency": "~35ms"},
-        {"Model": "YOLO11n Custom (Ours - Plate)", "mAP@50": "99.38%", "Params": "2.6M", "GFLOPs": "6.5", "Size": "5.4 MB", "CPU Latency": "~35ms"},
-    ])
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.markdown("#### ✅ Challenge Compliance Check")
-    checks = pd.DataFrame([
-        {"Requirement": "Pipeline FLOPs < 5 GFLOPs (per model)", "Ours": "6.5 GFLOPs", "Status": "✅ Acceptable (cascaded not simultaneous)"},
-        {"Requirement": "Inference latency < 250ms", "Ours": "~35ms CPU / ~8ms GPU", "Status": "✅ PASS"},
-        {"Requirement": "Model size < 150 MB total", "Ours": "~12 MB (2 models)", "Status": "✅ PASS"},
-        {"Requirement": "Vehicle mAP@50 ≥ 50%", "Ours": "COCO-pretrained 39.5% → acceptable", "Status": "✅ Standard Range"},
-        {"Requirement": "Plate mAP@50 ≥ 85%", "Ours": "99.38%", "Status": "✅ PASS"},
-        {"Requirement": "OCR char accuracy ≥ 80%", "Ours": "PaddleOCR + Temporal Fusion", "Status": "✅ PASS"},
-        {"Requirement": "Robustness retention ≥ 70%", "Ours": "CLAHE + Gamma + Unsharp Mask", "Status": "✅ PASS"},
-        {"Requirement": "Colab T4 GPU compatible", "Ours": "Auto-detects CUDA, GPU-optimized", "Status": "✅ PASS"},
-    ])
-    st.dataframe(checks, use_container_width=True, hide_index=True)
-
-# ─── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <hr style="border-color:#1a2a4a; margin:30px 0 10px 0;">
 <p style="text-align:center; color:#334455; font-size:0.78rem;">
-KnightSight EdgeVision &nbsp;·&nbsp; YOLO11n + BoT-SORT + PaddleOCR + Temporal OCR Fusion &nbsp;·&nbsp; 100% Offline Edge AI
+KnightSight EdgeVision &nbsp;·&nbsp; YOLO11n + PaddleOCR &nbsp;·&nbsp; 100% Offline Edge AI
 </p>
 """, unsafe_allow_html=True)
