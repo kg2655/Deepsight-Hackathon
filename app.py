@@ -155,16 +155,17 @@ def read_plate_text(ocr, plate_crop):
     """Universal OCR reader that works with both EasyOCR and PaddleOCR."""
     import easyocr
     try:
-        # Enhance plate for OCR
+        # Convert to clean black-on-white for OCR
         gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-        gray = clahe.apply(gray)
-        plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        # Adaptive threshold: handles uneven lighting on plates
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY, 21, 10)
+        plate_clean = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+        plate_clean = cv2.resize(plate_clean, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        plate_clean = cv2.copyMakeBorder(plate_clean, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
         if isinstance(ocr, easyocr.Reader):
-            results = ocr.readtext(plate_crop)
+            results = ocr.readtext(plate_clean)
             if results:
                 texts = [r[1] for r in results]
                 scores = [r[2] for r in results]
@@ -174,7 +175,7 @@ def read_plate_text(ocr, plate_crop):
                 return (validated if validated else combined.strip()), avg_conf
         else:
             # PaddleOCR fallback
-            r_gen = ocr.predict(plate_crop)
+            r_gen = ocr.predict(plate_clean)
             r = list(r_gen) if r_gen else []
             if r:
                 res_obj = r[0]
