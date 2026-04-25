@@ -117,12 +117,16 @@ def load_models():
 @st.cache_resource
 def load_ocr():
     try:
-        from paddleocr import PaddleOCR
-        import logging
-        logging.getLogger("ppocr").setLevel(logging.ERROR)
-        return PaddleOCR(use_textline_orientation=True, lang='en')
+        import easyocr
+        return easyocr.Reader(['en'], gpu=False, verbose=False)
     except Exception:
-        return None
+        try:
+            from paddleocr import PaddleOCR
+            import logging
+            logging.getLogger("ppocr").setLevel(logging.ERROR)
+            return PaddleOCR(use_textline_orientation=True, lang='en')
+        except Exception:
+            return None
 
 # ─── Preprocessing ────────────────────────────────────────────────────────────
 def preprocess(img):
@@ -146,6 +150,52 @@ def validate_plate(text):
     if 6 <= len(cleaned) <= 10:
         return cleaned
     return None
+
+def read_plate_text(ocr, plate_crop):
+    """Universal OCR reader that works with both EasyOCR and PaddleOCR."""
+    import easyocr
+    try:
+        # Enhance plate for OCR
+        gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+        gray = clahe.apply(gray)
+        plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
+        if isinstance(ocr, easyocr.Reader):
+            results = ocr.readtext(plate_crop)
+            if results:
+                texts = [r[1] for r in results]
+                scores = [r[2] for r in results]
+                combined = " ".join(texts)
+                avg_conf = sum(scores) / len(scores)
+                validated = validate_plate(combined)
+                return (validated if validated else combined.strip()), avg_conf
+        else:
+            # PaddleOCR fallback
+            r_gen = ocr.predict(plate_crop)
+            r = list(r_gen) if r_gen else []
+            if r:
+                res_obj = r[0]
+                found_texts, found_scores = [], []
+                if isinstance(res_obj, dict) and 'rec_texts' in res_obj:
+                    found_texts = res_obj['rec_texts']
+                    found_scores = res_obj.get('rec_scores', [1.0] * len(found_texts))
+                elif hasattr(res_obj, 'res') and 'rec_texts' in res_obj.res:
+                    found_texts = res_obj.res['rec_texts']
+                    found_scores = res_obj.res.get('rec_scores', [1.0] * len(found_texts))
+                elif isinstance(res_obj, list):
+                    found_texts = [line[1][0] for line in res_obj]
+                    found_scores = [line[1][1] for line in res_obj]
+                if found_texts:
+                    combined = " ".join(found_texts)
+                    avg_conf = sum(found_scores) / len(found_scores)
+                    validated = validate_plate(combined)
+                    return (validated if validated else combined.strip()), avg_conf
+    except Exception:
+        pass
+    return None, None
 
 # ─── Core Detection Function ──────────────────────────────────────────────────
 def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_preprocess=True):
@@ -203,47 +253,13 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
                     cv2.rectangle(annotated, (x1+px1, y1+py1), (x1+px2, y1+py2), PLATE_COLOR, 2)
 
                     if ocr is not None:
-                        try:
-                            # --- 🚀 PLATE ENHANCEMENT + UPSCALING ---
-                            gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-                            gray = clahe.apply(gray)
-                            plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                            plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                            plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-                            # -----------------------------------------
-
-                            # Use new predict logic
-                            r_gen = ocr.predict(plate_crop)
-                            r = list(r_gen) if r_gen else []
-                            
-                            found_texts = []
-                            found_scores = []
-                            
-                            if r:
-                                res_obj = r[0]
-                                if isinstance(res_obj, dict) and 'rec_texts' in res_obj:
-                                    found_texts = res_obj['rec_texts']
-                                    found_scores = res_obj.get('rec_scores', [1.0]*len(found_texts))
-                                elif hasattr(res_obj, 'res') and 'rec_texts' in res_obj.res:
-                                    found_texts = res_obj.res['rec_texts']
-                                    found_scores = res_obj.res.get('rec_scores', [1.0]*len(found_texts))
-                                elif isinstance(res_obj, list):
-                                    found_texts = [line[1][0] for line in res_obj]
-                                    found_scores = [line[1][1] for line in res_obj]
-
-                            if found_texts:
-                                combined = " ".join(found_texts)
-                                avg_c = sum(found_scores) / len(found_scores)
-                                validated = validate_plate(combined)
-                                plate_text = validated if validated else combined.strip()
-                                plate_conf = avg_c
-
-                                cv2.putText(annotated, plate_text,
-                                            (x1+px1, y1+py2 + 18),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, PLATE_COLOR, 2)
-                        except Exception:
-                            pass
+                        text, conf = read_plate_text(ocr, plate_crop)
+                        if text:
+                            plate_text = text
+                            plate_conf = conf
+                            cv2.putText(annotated, plate_text,
+                                        (x1+px1, y1+py2 + 18),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, PLATE_COLOR, 2)
 
         detections.append({
             "vehicle_type":    label,
@@ -281,45 +297,13 @@ def detect_frame(img_bgr, v_model, p_model, ocr, conf_thresh, iou_thresh, use_pr
             plate_conf = plate_conf_val
 
             if ocr is not None:
-                try:
-                    # Brighten plate crop for OCR
-                    gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-                    gray = clahe.apply(gray)
-                    plate_crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                    plate_crop = cv2.resize(plate_crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                    plate_crop = cv2.copyMakeBorder(plate_crop, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-
-                    r_gen = ocr.predict(plate_crop)
-                    r = list(r_gen) if r_gen else []
-
-                    found_texts = []
-                    found_scores = []
-
-                    if r:
-                        res_obj = r[0]
-                        if isinstance(res_obj, dict) and 'rec_texts' in res_obj:
-                            found_texts = res_obj['rec_texts']
-                            found_scores = res_obj.get('rec_scores', [1.0] * len(found_texts))
-                        elif hasattr(res_obj, 'res') and 'rec_texts' in res_obj.res:
-                            found_texts = res_obj.res['rec_texts']
-                            found_scores = res_obj.res.get('rec_scores', [1.0] * len(found_texts))
-                        elif isinstance(res_obj, list):
-                            found_texts = [line[1][0] for line in res_obj]
-                            found_scores = [line[1][1] for line in res_obj]
-
-                    if found_texts:
-                        combined = " ".join(found_texts)
-                        avg_c = sum(found_scores) / len(found_scores)
-                        validated = validate_plate(combined)
-                        plate_text = validated if validated else combined.strip()
-                        plate_conf = avg_c
-
-                        cv2.putText(annotated, plate_text,
-                                    (px1, py2 + 22),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, PLATE_COLOR, 2)
-                except Exception:
-                    pass
+                text, conf = read_plate_text(ocr, plate_crop)
+                if text:
+                    plate_text = text
+                    plate_conf = conf
+                    cv2.putText(annotated, plate_text,
+                                (px1, py2 + 22),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, PLATE_COLOR, 2)
 
             detections.append({
                 "vehicle_type":    "Direct Plate",
